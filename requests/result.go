@@ -8,6 +8,9 @@ type ResultRepository struct {
 	Organization string
 	Name         string
 	Languages    []*ResultLanguage
+	IsFork       bool
+	IsPR         bool
+	PRCount      int
 }
 
 type ResultLanguage struct {

@@ -19,7 +19,7 @@ inputs:
     description: "Github UserName"
   limit:
     required: true
-    default: 6
+    default: 12
     description: "Limit of languages"
   ignoredOrgsFlag:
     required: true
@@ -29,6 +29,26 @@ inputs:
     required: true
     default: ""
     description: "Comma-separated list of ignored repositories"
+  ignoredLangsFlag:
+    required: false
+    default: ""
+    description: "Comma-separated list of ignored languages"
+  withForks:
+    required: false
+    default: "false"
+    description: "Include forked repositories in the analysis (true/false)"
+  withStreak:
+    required: false
+    default: "true"
+    description: "Include streak statistics of your github account (true/false)"
+  showStats:
+    required: false
+    default: "true"
+    description: "Include statistics of your github account (true/false)"
+  statsFeatures:
+    required: false
+    default: ""
+    description: "Comma-separated list of statistics features to include (commits,prs,reviews,issues,stars,repos,followers)"
 
 env:
   GITHUB_TOKEN: "As provided by Github Actions"
@@ -37,7 +57,7 @@ runs:
   using: composite
   steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
       with:
         fetch-depth: 0
     - name: Set up Git
@@ -47,9 +67,9 @@ runs:
       shell: bash
 
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
       with:
-        go-version: "1.23"
+        go-version: "1.26"
 
     - name: Build the Go binary
       run: |
@@ -64,13 +84,17 @@ runs:
         GITHUB_TOKEN: ${{ env.GITHUB_TOKEN }}
     - name: Run the Go binary
       run: |
-        args=""
-        [ -n "${{ inputs.user }}" ] && args="$args -user=${{ inputs.user }}"
-        [ -n "${{ inputs.limit }}" ] && args="$args -limit=${{ inputs.limit }}"
-        [ -n "${{ inputs.ignoredOrgsFlag }}" ] && args="$args -ignore-orgs=${{ inputs.ignoredOrgsFlag }}"
-        [ -n "${{ inputs.ignoredReposFlag }}" ] && args="$args -ignore-repos=${{ inputs.ignoredReposFlag }}"
-        
-        ./app $args -gh-token=${{ env.GITHUB_TOKEN }}
+        args=()
+        [ -n "${{ inputs.user }}" ] && args+=("-user=${{ inputs.user }}")
+        [ -n "${{ inputs.limit }}" ] && args+=("-limit=${{ inputs.limit }}")
+        [ -n "${{ inputs.ignoredOrgsFlag }}" ] && args+=("-ignore-orgs=${{ inputs.ignoredOrgsFlag }}")
+        [ -n "${{ inputs.ignoredReposFlag }}" ] && args+=("-ignore-repos=${{ inputs.ignoredReposFlag }}")
+        [ -n "${{ inputs.ignoredLangsFlag }}" ] && args+=("-ignore-langs=${{ inputs.ignoredLangsFlag }}")
+        [ -n "${{ inputs.withForks }}" ] && args+=("-with-forks=${{ inputs.withForks }}")
+        [ -n "${{ inputs.withStreak }}" ] && args+=("-with-streak=${{ inputs.withStreak }}")
+        [ -n "${{ inputs.showStats }}" ] && args+=("-show-stats=${{ inputs.showStats }}")
+        [ -n "${{ inputs.statsFeatures }}" ] && args+=("-stats=${{ inputs.statsFeatures }}")
+        ./app "${args[@]}" -gh-token=${{ env.GITHUB_TOKEN }}
         rm -R githubtoplanguages
         rm app
       shell: bash
@@ -85,7 +109,7 @@ runs:
         else
           git add .
           git commit -m "[Update] Generate github top language"
-          git pull && git push origin HEAD:${{ github.event.repository.default_branch }}
+          git pull origin ${{ github.event.repository.default_branch }} && git push origin HEAD:${{ github.event.repository.default_branch }}
         fi
       shell: bash
       env:

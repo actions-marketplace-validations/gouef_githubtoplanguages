@@ -2,14 +2,15 @@ package main
 
 import (
 	"flag"
+	"log"
+	"os"
+	"strconv"
+	"strings"
+
+	"github.com/gouef/githubtoplanguages/generators"
 	"github.com/gouef/githubtoplanguages/requests"
 	"github.com/gouef/utils"
 	"github.com/joho/godotenv"
-	"log"
-	"os"
-	"sort"
-	"strconv"
-	"strings"
 )
 
 func main() {
@@ -17,10 +18,16 @@ func main() {
 
 	tokenFlag := flag.String("gh-token", "", "Github API token")
 	userFlag := flag.String("user", "", "Github username")
-	limitFlag := flag.Int("limit", 6, "Limit of languages")
+	limitFlag := flag.Int("limit", 12, "Limit of languages")
 	outputFlag := flag.String("output", "", "Name of file (without .svg")
 	ignoredOrgsFlag := flag.String("ignore-orgs", "", "Comma-separated list of ignored organizations")
 	ignoredReposFlag := flag.String("ignore-repos", "", "Comma-separated list of ignored repositories")
+	ignoredLangsFlag := flag.String("ignore-langs", "", "Comma-separated list of ignored languages")
+	withForksFlag := flag.String("with-forks", "false", "Include forked repositories in the analysis (true/false)")
+	withStreakFlag := flag.String("with-streak", "true", "Include streak statistics of your github account (true/false)")
+	showStatsFlag := flag.String("show-stats", "false", "Show statistics section")
+	statsFeaturesFlag := flag.String("stats", "", "Comma-separated list of stats features to include")
+
 	flag.Parse()
 
 	token := *tokenFlag
@@ -41,6 +48,11 @@ func main() {
 		log.Fatal("GITHUB_USERNAME is not set")
 	}
 
+	withForks, _ := strconv.ParseBool(getPriorityValue(*withForksFlag, "GITHUB_WITH_FORKS"))
+	withStreak, _ := strconv.ParseBool(getPriorityValue(*withStreakFlag, "GITHUB_WITH_STREAK"))
+	showStats, _ := strconv.ParseBool(getPriorityValue(*showStatsFlag, "GITHUB_SHOW_STATS"))
+	statsFeatures := getPriorityValue(*statsFeaturesFlag, "GITHUB_STATS_FEATURES")
+
 	output := *outputFlag
 
 	if output == "" {
@@ -49,6 +61,7 @@ func main() {
 
 	ignoredOrganizations := explode(",", getPriorityValue(*ignoredOrgsFlag, "GITHUB_IGNORE_ORGANIZATIONS"))
 	ignoredRepositories := explode(",", getPriorityValue(*ignoredReposFlag, "GITHUB_IGNORE_REPOS"))
+	ignoredLanguages := explode(",", getPriorityValue(*ignoredLangsFlag, "GITHUB_IGNORE_LANGS"))
 	ignored := append(ignoredOrganizations, ignoredRepositories...)
 
 	limitEnv := os.Getenv("GITHUB_TOP_LIMIT")
@@ -58,6 +71,9 @@ func main() {
 		limit, _ = strconv.Atoi(limitEnv)
 	}
 
+	var ignoredSize int
+
+	// Organizations
 	result, err := requests.FetchOrganizations(user, token, ignored...)
 
 	if err != nil {
@@ -68,16 +84,26 @@ func main() {
 	languages := make(map[string]int)
 	colors := make(map[string]string)
 
+	log.Println("Processing organizations..." + strconv.Itoa(len(result.Repositories)))
+
 	for _, repoList := range result.Repositories {
 		repositories = append(repositories, repoList.Name)
 
 		for _, lang := range repoList.Languages {
+			if isImageLanguage(lang.Name) {
+				continue
+			}
+			if shouldIgnoreLanguage(lang.Name, ignoredLanguages) {
+				ignoredSize += lang.Size
+				continue
+			}
 			languages[lang.Name] += lang.Size
 			colors[lang.Name] = lang.Color
 		}
 	}
 
-	result, err = requests.FetchUser(user, token, ignored...)
+	// User
+	result, err = requests.FetchUser(user, token, false, ignored...)
 
 	if err != nil {
 		log.Fatalf("Failed to fetch user: %v", err)
@@ -91,65 +117,103 @@ func main() {
 		repositories = append(repositories, repoList.Name)
 
 		for _, lang := range repoList.Languages {
+			if isImageLanguage(lang.Name) {
+				continue
+			}
+			if shouldIgnoreLanguage(lang.Name, ignoredLanguages) {
+				ignoredSize += lang.Size
+				continue
+			}
 			languages[lang.Name] += lang.Size
 			colors[lang.Name] = lang.Color
 		}
 	}
 
-	resultLanguages := sortLanguages(languages, limit)
+	// Forks
+	if withForks {
+		result, err = requests.FetchUser(user, token, true, ignored...)
+		if err != nil {
+			log.Fatalf("Failed to fetch user forks: %v", err)
+		}
+		for _, repoList := range result.Repositories {
+			for _, lang := range repoList.Languages {
+				if isImageLanguage(lang.Name) {
+					continue
+				}
+				if shouldIgnoreLanguage(lang.Name, ignoredLanguages) {
+					ignoredSize += lang.Size
+					continue
+				}
+				languages[lang.Name] += lang.Size
+				colors[lang.Name] = lang.Color
+			}
+		}
+	}
+
+	log.Println("Downloading latest language definitions from GitHub Linguist...")
+	extensionMap, err := requests.LoadLinguistLanguages()
+	if err != nil {
+		log.Fatalf("Failed to load dynamic languages: %v", err)
+	}
+
+	//PRs
+	prResult, err := requests.FetchUserPRLanguages(token, extensionMap, ignored...)
+	if err != nil {
+		log.Fatalf("Failed to fetch PR languages: %v", err)
+	}
+	for _, repoList := range prResult.Repositories {
+		for _, lang := range repoList.Languages {
+			if isImageLanguage(lang.Name) {
+				continue
+			}
+			if shouldIgnoreLanguage(lang.Name, ignoredLanguages) {
+				ignoredSize += lang.Size
+				continue
+			}
+			languages[lang.Name] += lang.Size
+			colors[lang.Name] = lang.Color
+		}
+	}
+
+	resultLanguages := sortLanguages(languages, limit, ignoredSize)
 
 	for _, lang := range resultLanguages {
+		if lang.Name == "Others" {
+			lang.Color = "#d4d4d4"
+			continue
+		}
 		lang.Color = colors[lang.Name]
 	}
 
-	generateSvg(resultLanguages, output)
-
-}
-
-type Language struct {
-	Name       string
-	Color      string
-	Size       int
-	Percentage float64
-}
-
-func sortLanguages(languages map[string]int, limit int) []*Language {
-	type kv struct {
-		Key   string
-		Value int
+	var streakStats *requests.StreakStats = nil
+	if withStreak {
+		streakStats, err = requests.FetchContributionStats(user, token)
+		if err != nil {
+			log.Printf("Warning: Failed to fetch contribution streaks: %v", err)
+			streakStats = &requests.StreakStats{}
+		}
 	}
 
-	var sorted []kv
-	for k, v := range languages {
-		sorted = append(sorted, kv{k, v})
+	var globalStats *requests.GlobalStats = nil
+	if showStats {
+		globalStats, err = requests.FetchGlobalStats(user, token)
+		if err != nil {
+			log.Printf("Warning: Failed to fetch global stats: %v", err)
+			globalStats = &requests.GlobalStats{}
+		}
 	}
 
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].Value > sorted[j].Value
-	})
-
-	if limit > len(sorted) {
-		limit = len(sorted)
+	var generatorLanguages []*generators.Language
+	for _, lang := range resultLanguages {
+		generatorLanguages = append(generatorLanguages, &generators.Language{
+			Name:       lang.Name,
+			Color:      lang.Color,
+			Percentage: lang.Percentage,
+		})
 	}
 
-	sortedMap := make(map[string]int, limit)
+	generators.GenerateCard(generatorLanguages, streakStats, globalStats, withStreak, showStats, statsFeatures, output)
 
-	var languagesSize int
-	for i := 0; i < limit; i++ {
-		sortedMap[sorted[i].Key] = sorted[i].Value
-		languagesSize += sorted[i].Value
-	}
-	result := make([]*Language, 0)
-
-	for key, size := range sortedMap {
-		result = append(result, &Language{Name: key, Size: size, Percentage: (float64(size) / float64(languagesSize)) * 100})
-	}
-
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].Percentage > result[j].Percentage
-	})
-
-	return result
 }
 
 func getPriorityValue(flagValue, envKey string) string {

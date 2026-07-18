@@ -3,9 +3,10 @@ package requests
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/gouef/utils"
 	"io"
 	"net/http"
+
+	"github.com/gouef/utils"
 )
 
 type GraphQLResponse struct {
@@ -47,7 +48,7 @@ type RepositoryNode struct {
 }
 
 type PrimaryLanguage struct {
-	Name string `json:"Name"`
+	Name string `json:"name"`
 }
 
 type Languages struct {
@@ -56,22 +57,18 @@ type Languages struct {
 
 type LanguageEdge struct {
 	Node LanguageNode `json:"node"`
-	Size int          `json:"Size"`
+	Size int          `json:"size"`
 }
+
 type LanguageNode struct {
-	Name  string `json:"Name"`
+	Name  string `json:"name"`
 	Color string `json:"color"`
 }
 
-type ResultOrganizations struct {
-	List      map[string][]string
-	Languages map[string]int
-}
-
 func FetchOrganizations(loginName, token string, ignored ...string) (*Result, error) {
-	query := `query {
+	query := `query($after: String) {
 	  viewer {
-		organizations(first: 100, after: null) {
+		organizations(first: 100, after: $after) {
 		  nodes {
 			login
 			viewerCanAdminister
@@ -83,7 +80,7 @@ func FetchOrganizations(loginName, token string, ignored ...string) (*Result, er
 						primaryLanguage {
 							name
 						}
-						languages(first: 2, after: null) {
+						languages(first: 10, after: null) {
 							edges {
 								node {
 									name
@@ -98,55 +95,76 @@ func FetchOrganizations(loginName, token string, ignored ...string) (*Result, er
 		  }
 		  pageInfo {
 			hasNextPage
-			hasPreviousPage
 			endCursor
-			startCursor
 		  }
 		}
 	  }
 	}`
 
-	var result GraphQLResponse
+	finalResult := &Result{}
+	var cursor interface{} = nil
 
-	resp, err := Request(token, query)
-
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("GitHub API returned non-200 status: %d, Body: %s", resp.StatusCode, string(bodyBytes))
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
-	}
-
-	var result2 = &Result{}
-
-	for _, org := range result.Data.Viewer.Organizations.Nodes {
-		if utils.InArray(org.Login, ignored) {
-			continue
+	for {
+		variables := map[string]interface{}{
+			"after": cursor,
 		}
-		if org.CanAdminister {
-			for _, r := range org.Repositories.Edges {
-				if utils.InArray(r.Node.Name, ignored) {
-					continue
-				}
-				resultRepository := &ResultRepository{Name: r.Node.NameWithOwner, Organization: r.Node.Name}
 
-				var languages []*ResultLanguage
-				for _, l := range r.Node.Languages.Edges {
-					languages = append(languages, &ResultLanguage{Name: l.Node.Name, Size: l.Size, Color: l.Node.Color})
-				}
-				resultRepository.Languages = languages
+		resp, err := Request(token, query, variables)
+		if err != nil {
+			return nil, err
+		}
 
-				result2.Repositories = append(result2.Repositories, resultRepository)
+		if resp.StatusCode != http.StatusOK {
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			return nil, fmt.Errorf("GitHub API returned non-200 status: %d, Body: %s", resp.StatusCode, string(bodyBytes))
+		}
+
+		var result GraphQLResponse
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			resp.Body.Close()
+			return nil, err
+		}
+		resp.Body.Close()
+
+		orgData := result.Data.Viewer.Organizations
+
+		if len(orgData.Nodes) == 0 {
+			break
+		}
+
+		for _, org := range orgData.Nodes {
+			if utils.InArray(org.Login, ignored) {
+				continue
+			}
+			if org.CanAdminister {
+				for _, r := range org.Repositories.Edges {
+					if utils.InArray(r.Node.Name, ignored) || utils.InArray(r.Node.NameWithOwner, ignored) {
+						continue
+					}
+
+					resultRepository := &ResultRepository{
+						Name:         r.Node.NameWithOwner,
+						Organization: org.Login,
+					}
+
+					var languages []*ResultLanguage
+					for _, l := range r.Node.Languages.Edges {
+						languages = append(languages, &ResultLanguage{Name: l.Node.Name, Size: l.Size, Color: l.Node.Color})
+					}
+					resultRepository.Languages = languages
+
+					finalResult.Repositories = append(finalResult.Repositories, resultRepository)
+				}
 			}
 		}
+
+		if !orgData.PageInfo.HasNextPage {
+			break
+		}
+
+		cursor = orgData.PageInfo.EndCursor
 	}
 
-	return result2, nil
+	return finalResult, nil
 }
